@@ -1,8 +1,9 @@
 name: Auto Renew Bot-hosting
 
 on:
-  schedule:
-    - cron: '50 8 */2 * *' # 每2天UTC 08:50（北京时间16:50）,自行根据服务到期时间调整
+  # schedule:
+  #   - cron: '50 8 */2 * *' # 每2天UTC 08:50（北京时间16:50）,自行根据服务到期时间调整
+  # GitHub schedule 经常不触发：2026-10-01 起改由 CF Worker bothosting-renew 定时 dispatch，恢复请取消上面两行注释
   workflow_dispatch:
 
 jobs:
