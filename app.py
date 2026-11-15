@@ -552,7 +552,7 @@ def main():
                             expiry_date=new_expiry
                         )
                     )
-                elif _ne and _ne >= datetime.now() + timedelta(days=3):
+                elif _ne and _ne.date() >= (datetime.now() + timedelta(days=3)).date():
                     print(f"✅ 续期成功！当前到期: {new_expiry}")
                     send_telegram_message(
                         format_notification(
