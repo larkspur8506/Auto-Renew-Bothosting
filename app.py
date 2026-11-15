@@ -541,6 +541,24 @@ def main():
                     )
                 else:
                     print("⚠️ 续期结果未知，到期日期未变化，请手动检查")
+                    # 诊断：站点改版后到期文本模式可能失效，dump 关键行（脱敏，仓库 public）
+                    try:
+                        import html as _html
+                        _txt = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", new_page_text, flags=re.S | re.I)
+                        _txt = _html.unescape(re.sub(r"<[^>]+>", "\n", _txt))
+                        _seen = set()
+                        for _ln in (l.strip() for l in _txt.splitlines()):
+                            if not _ln or len(_ln) > 160 or _ln in _seen:
+                                continue
+                            if re.search(r"renew|expire|day|plan|credit|free|counter|timer", _ln, re.I):
+                                _ln = re.sub(r"[A-Za-z0-9+/=_-]{40,}", "<redacted>", _ln)
+                                _ln = re.sub(r"[\w.+-]+@[\w.-]+", "<email>", _ln)
+                                _seen.add(_ln)
+                                print(f"   📄 {_ln}")
+                            if len(_seen) >= 30:
+                                break
+                    except Exception:
+                        pass
                     send_telegram_message(
                         format_notification(
                             "⚠️ 续期可能未成功",
