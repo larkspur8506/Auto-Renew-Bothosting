@@ -3,7 +3,7 @@
 
 import os, re, sys, time, json, requests, subprocess
 import urllib.request, urllib.parse, urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 from seleniumbase import SB
 
 # 环境变量配置(可以直接私库在双引号里填写)
@@ -165,14 +165,21 @@ def extract_expiry_date(page_source: str) -> str:
     patterns = [
         r"[Ee]xpires\s*[:\-]?\s*(\d{4}/\d{2}/\d{2})",   # Expires 2026/07/07
         r"[Ee]xpires\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})",   # Expires 07/07/2026 (MM/DD/YYYY)
+        r"[Ee]xpires\s+(\d{1,2}\s+[A-Za-z]{3,}\.?\s+\d{4})",  # Expires 18 Nov 2026（2026-11 改版后的格式）
         r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew",        # 2026/07/07 - renew
         r"(\d{2}/\d{2}/\d{4})\s*[\-–]\s*renew",        # 07/07/2026 - renew
         r"(\d{4}/\d{2}/\d{2})\s*[\-–]\s*renew manually to extend for 4 days", # 2026/07/07 - renew manually to extend for 4 days
     ]
+    _MONTHS = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+               "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
     for pattern in patterns:
         match = re.search(pattern, page_source)
         if match:
             date_str = match.group(1)
+            # Expires 18 Nov 2026 → 2026/11/18
+            _m = re.match(r"(\d{1,2})\s+([A-Za-z]{3,})\.?\s+(\d{4})$", date_str)
+            if _m and _m.group(2)[:3].lower() in _MONTHS:
+                return f"{_m.group(3)}/{_MONTHS[_m.group(2)[:3].lower()]:02d}/{int(_m.group(1)):02d}"
             # 如果是 MM/DD/YYYY 格式，转换为 YYYY/MM/DD
             if len(date_str.split('/')[-1]) == 4:  # 年份长度4
                 parts = date_str.split('/')
@@ -530,12 +537,27 @@ def main():
                     )
                 )
             else:
+                _ne = None
+                try:
+                    _y, _mth, _d = (new_expiry or "").split("/")
+                    _ne = datetime(int(_y), int(_mth), int(_d))
+                except Exception:
+                    _ne = None
                 if new_expiry and new_expiry != current_expiry:
                     print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
                     send_telegram_message(
                         format_notification(
                             "✅ 续期成功",
                             extra="到期日期已更新",
+                            expiry_date=new_expiry
+                        )
+                    )
+                elif _ne and _ne >= datetime.now() + timedelta(days=3):
+                    print(f"✅ 续期成功！当前到期: {new_expiry}")
+                    send_telegram_message(
+                        format_notification(
+                            "✅ 续期成功",
+                            extra="到期时间健康（点击后日期未再延长，可能已达上限）",
                             expiry_date=new_expiry
                         )
                     )
