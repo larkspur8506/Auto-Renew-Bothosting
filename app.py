@@ -549,12 +549,6 @@ def main():
             try:
                 _requests = sb.execute_script('return window.__renewRequests || []')
                 print('Renewal response metadata:', json.dumps(_requests, ensure_ascii=False))
-                _visible = sb.get_text('body')
-                for _line in _visible.splitlines():
-                    if re.search(r'error|failed|invalid|captcha|turnstile|try again|verify', _line, re.I):
-                        _line = re.sub(r'[A-Za-z0-9+/=_-]{30,}', '<redacted>', _line)
-                        _line = re.sub(r'[\w.+-]+@[\w.-]+', '<email>', _line)
-                        print('Renewal UI:', _line[:200])
             except Exception:
                 pass
             sb.refresh_page()
