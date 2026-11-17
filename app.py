@@ -509,6 +509,27 @@ def main():
             print("⏳ 等待续期按钮可用并点击...")
             time.sleep(5) 
 
+            # Record only renewal request metadata, never auth headers/tokens.
+            sb.execute_script("""
+              window.__renewRequests = [];
+              const originalFetch = window.fetch;
+              window.fetch = async function(...args) {
+                const response = await originalFetch.apply(this, args);
+                const path = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href).pathname;
+                if (/renew|billing|subscription/i.test(path)) {
+                  const item = {path, status: response.status};
+                  window.__renewRequests.push(item);
+                  try {
+                    const data = await response.clone().json();
+                    for (const key of ['error', 'message', 'success']) {
+                      if (typeof data[key] === 'string' || typeof data[key] === 'boolean')
+                        item[key] = String(data[key]).slice(0, 200);
+                    }
+                  } catch (_) {}
+                }
+                return response;
+              };
+            """)
             modal_button_clicked = False
             try:
                 sb.click('button:contains("Renew for 4 days")', timeout=8)
@@ -518,7 +539,26 @@ def main():
                 print(f"续期按钮点击失败: {e}")
 
             print("⏳ 等待新的过期时间...")
-            sb.sleep(6)
+            # Poll asynchronous UI completion; then reload once to read persisted state.
+            for _attempt in range(6):
+                sb.sleep(3)
+                _body = sb.get_page_source()
+                _expiry = extract_expiry_date(_body)
+                if (_expiry and _expiry != current_expiry) or re.search(r"Renew in (\d{2}:\d{2}:\d{2})", _body):
+                    break
+            try:
+                _requests = sb.execute_script('return window.__renewRequests || []')
+                print('Renewal response metadata:', json.dumps(_requests, ensure_ascii=False))
+                _visible = sb.get_text('body')
+                for _line in _visible.splitlines():
+                    if re.search(r'error|failed|invalid|captcha|turnstile|try again|verify', _line, re.I):
+                        _line = re.sub(r'[A-Za-z0-9+/=_-]{30,}', '<redacted>', _line)
+                        _line = re.sub(r'[\w.+-]+@[\w.-]+', '<email>', _line)
+                        print('Renewal UI:', _line[:200])
+            except Exception:
+                pass
+            sb.refresh_page()
+            sb.sleep(4)
 
             # 提取新的到期日期和倒计时
             new_page_text = sb.get_page_source()
