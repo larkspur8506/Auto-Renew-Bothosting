@@ -235,10 +235,47 @@ window.__renewProbe = {reqs: [], submits: 0, clicks: []};
   };
   window.addEventListener('submit', () => { P.submits += 1; }, true);
   document.addEventListener('click', (e) => {
-    const t = (e.target && e.target.closest) ? e.target.closest('button,a,[role=button]') : null;
-    if (t && P.clicks.length < 10) P.clicks.push(((t.innerText || t.value || '').trim()).slice(0, 40));
+    const t = e.target;
+    if (!t || P.clicks.length >= 10) return;
+    const txt = ((t.innerText || t.value || '') + '').trim().slice(0, 30);
+    P.clicks.push({
+      tag: (t.tagName || '').toLowerCase(),
+      cls: String(t.className || '').slice(0, 60),
+      txt: txt,
+      isRenewBtn: /renew for 4 days/i.test(txt)
+    });
   }, true);
 })();
+"""
+
+# 用 DOM 直接点击模态框内的续期按钮：先做命中测试（谁压在按钮上），再 el.click()
+RENEW_CLICK_JS = """
+(() => {
+  const btns = Array.from(document.querySelectorAll('button,a,[role=button]'))
+    .filter(b => /^\\s*Renew for 4 days\\s*$/i.test((b.innerText || '').trim()));
+  if (!btns.length) return {ok: false, reason: 'no-button'};
+  const b = btns[btns.length - 1];
+  const r = b.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  let top = null;
+  try { top = document.elementFromPoint(cx, cy); } catch (e) {}
+  const info = {
+    ok: true,
+    count: btns.length,
+    rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+    atPoint: top ? ((top.tagName || '').toLowerCase() + '.' + String(top.className || '').slice(0, 60)) : null,
+    pointIsButton: !!(top && (top === b || b.contains(top))),
+    disabled: !!b.disabled
+  };
+  try { b.scrollIntoView({block: 'center'}); } catch (e) {}
+  try {
+    b.click();
+    info.clicked = 'js';
+  } catch (e) {
+    info.clicked = 'js-failed:' + (e && e.name ? e.name : 'err');
+  }
+  return info;
+})()
 """
 
 RENEW_BUTTONS_JS = """
@@ -619,12 +656,21 @@ def main():
                   json.dumps(_states_before, ensure_ascii=False) if _states_before is not None else '读取失败')
 
             modal_button_clicked = False
+            # 物理点击曾被 Turnstile 浮层吞掉（probe 记录到 0 次 click/0 请求），改为 DOM click
+            _click_info = None
             try:
-                sb.click('button:contains("Renew for 4 days")', timeout=8)
-                modal_button_clicked = True
-                print("✅ 已点击续期按钮")
+                _click_info = sb.execute_script(RENEW_CLICK_JS)
+                print('续期点击命中测试:', json.dumps(_click_info, ensure_ascii=False))
             except Exception as e:
-                print(f"续期按钮点击失败: {e}")
+                print(f"DOM 点击执行异常: {type(e).__name__}")
+            if not (_click_info or {}).get('ok'):
+                try:
+                    sb.click('button:contains("Renew for 4 days")', timeout=8)
+                    _click_info = {'ok': True, 'clicked': 'physical-fallback'}
+                except Exception as e:
+                    print(f"续期按钮点击失败: {e}")
+            modal_button_clicked = bool((_click_info or {}).get('ok'))
+            print("✅ 已点击续期按钮" if modal_button_clicked else "❌ 未点到续期按钮")
 
             sb.sleep(3)
             _probe = read_renew_probe(sb)
@@ -633,7 +679,16 @@ def main():
             else:
                 print('Renewal probe:', json.dumps(_probe, ensure_ascii=False))
                 if not (_probe.get('reqs') or []) and not _probe.get('submits'):
-                    print('❌ 点击未产生任何请求或表单提交（按钮禁用/未触发提交）')
+                    print('⚠️ 首点未产生请求/提交，重试一次 DOM click')
+                    try:
+                        _retry = sb.execute_script(RENEW_CLICK_JS)
+                        print('重试命中测试:', json.dumps(_retry, ensure_ascii=False))
+                    except Exception as e:
+                        print(f"重试点击异常: {type(e).__name__}")
+                    sb.sleep(4)
+                    _probe = read_renew_probe(sb)
+                    print('Renewal probe(重试后):',
+                          'CONTEXT_LOST' if _probe is None else json.dumps(_probe, ensure_ascii=False))
 
             print("⏳ 等待新的过期时间...")
             # Poll asynchronous UI completion; then reload once to read persisted state.
