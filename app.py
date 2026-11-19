@@ -189,6 +189,109 @@ def extract_expiry_date(page_source: str) -> str:
             return date_str
     return None
 
+# ---- 续期提交探针：只采集请求元数据（method/path/status/短错误串），不碰 header/cookie/body ----
+RENEW_PROBE_JS = """
+window.__renewProbe = {reqs: [], submits: 0, clicks: []};
+(function(){
+  const P = window.__renewProbe;
+  const pathOf = (u) => { try { return new URL(u, location.href).pathname; } catch (e) { return ''; } };
+  const brief = (obj, item) => {
+    try {
+      for (const k of ['error', 'message', 'success', 'code', 'ok', 'detail']) {
+        const v = obj[k];
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+          item[k] = String(v).slice(0, 120);
+      }
+    } catch (e) {}
+  };
+  const of = window.fetch;
+  window.fetch = async function(...a) {
+    const u = (typeof a[0] === 'string') ? a[0] : ((a[0] && a[0].url) || '');
+    const item = {kind: 'fetch', method: ((a[1] && a[1].method) || 'GET'), path: pathOf(u)};
+    try {
+      const r = await of.apply(this, a);
+      item.status = r.status;
+      try { brief(await r.clone().json(), item); } catch (e) {}
+      P.reqs.push(item);
+      return r;
+    } catch (e) {
+      item.status = 'NETERR:' + ((e && e.name) || 'unknown');
+      P.reqs.push(item);
+      throw e;
+    }
+  };
+  const XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(m, u, ...rest) {
+    this.__p = pathOf(u); this.__m = m;
+    return XO.call(this, m, u, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function(...a) {
+    this.addEventListener('loadend', () => {
+      const item = {kind: 'xhr', method: this.__m, path: this.__p, status: this.status};
+      try { brief(JSON.parse(this.responseText || ''), item); } catch (e) {}
+      P.reqs.push(item);
+    });
+    return XS.apply(this, a);
+  };
+  window.addEventListener('submit', () => { P.submits += 1; }, true);
+  document.addEventListener('click', (e) => {
+    const t = (e.target && e.target.closest) ? e.target.closest('button,a,[role=button]') : null;
+    if (t && P.clicks.length < 10) P.clicks.push(((t.innerText || t.value || '').trim()).slice(0, 40));
+  }, true);
+})();
+"""
+
+RENEW_BUTTONS_JS = """
+(() => {
+  const path = (f) => { try { return new URL(f, location.href).pathname; } catch (e) { return ''; } };
+  return Array.from(document.querySelectorAll('button,a,[role=button]'))
+    .filter(b => /renew/i.test(b.innerText || ''))
+    .slice(0, 8)
+    .map(b => {
+      const r = b.getBoundingClientRect();
+      const ts = document.querySelector('input[name="cf-turnstile-response"]');
+      return {
+        tag: b.tagName.toLowerCase(),
+        text: (b.innerText || '').trim().slice(0, 40),
+        disabled: !!b.disabled,
+        ariaDisabled: b.getAttribute('aria-disabled'),
+        visible: !!(b.offsetParent !== null && r.width > 0 && r.height > 0),
+        inForm: !!b.form,
+        formAction: b.form ? path(b.form.getAttribute('action') || '') : '',
+        submitType: b.type || '',
+        turnstileInput: ts ? (ts.value ? 'set' : 'empty') : 'none'
+      };
+    });
+})()
+"""
+
+
+def install_renew_probe(sb):
+    """装上 fetch/XHR/submit/click 探针，只记元数据"""
+    sb.execute_script(RENEW_PROBE_JS)
+
+
+def read_renew_probe(sb):
+    """读探针；返回 None 表示执行上下文已丢失（页面发生了跳转/重载）"""
+    try:
+        return sb.execute_script(
+            "return window.__renewProbe ? "
+            "{url: location.pathname, reqs: window.__renewProbe.reqs, "
+            "submits: window.__renewProbe.submits, clicks: window.__renewProbe.clicks} : null;"
+        )
+    except Exception as e:
+        print(f"探针读取失败: {type(e).__name__}")
+        return None
+
+
+def renew_button_states(sb):
+    try:
+        return sb.execute_script(RENEW_BUTTONS_JS)
+    except Exception as e:
+        print(f"按钮状态读取失败: {type(e).__name__}")
+        return None
+
+
 #   Discord OAuth 登录（SESSION_TOKEN 失效时的备用方案）
 DISCORD_CLIENT_ID   = "884382422530158623"
 OAUTH_REDIRECT_URI  = "https://bot-hosting.net/login"
@@ -509,27 +612,12 @@ def main():
             print("⏳ 等待续期按钮可用并点击...")
             time.sleep(5) 
 
-            # Record only renewal request metadata, never auth headers/tokens.
-            sb.execute_script("""
-              window.__renewRequests = [];
-              const originalFetch = window.fetch;
-              window.fetch = async function(...args) {
-                const response = await originalFetch.apply(this, args);
-                const path = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href).pathname;
-                if (/renew|billing|subscription/i.test(path)) {
-                  const item = {path, status: response.status};
-                  window.__renewRequests.push(item);
-                  try {
-                    const data = await response.clone().json();
-                    for (const key of ['error', 'message', 'success']) {
-                      if (typeof data[key] === 'string' || typeof data[key] === 'boolean')
-                        item[key] = String(data[key]).slice(0, 200);
-                    }
-                  } catch (_) {}
-                }
-                return response;
-              };
-            """)
+            # 装探针（fetch + XHR + form submit），只记 method/path/status/短错误串，不碰 header/cookie/body
+            install_renew_probe(sb)
+            _states_before = renew_button_states(sb)
+            print('续期按钮状态:',
+                  json.dumps(_states_before, ensure_ascii=False) if _states_before is not None else '读取失败')
+
             modal_button_clicked = False
             try:
                 sb.click('button:contains("Renew for 4 days")', timeout=8)
@@ -538,17 +626,29 @@ def main():
             except Exception as e:
                 print(f"续期按钮点击失败: {e}")
 
+            sb.sleep(3)
+            _probe = read_renew_probe(sb)
+            if _probe is None:
+                print('Renewal probe: CONTEXT_LOST（点击后页面已跳转/重载）')
+            else:
+                print('Renewal probe:', json.dumps(_probe, ensure_ascii=False))
+                if not (_probe.get('reqs') or []) and not _probe.get('submits'):
+                    print('❌ 点击未产生任何请求或表单提交（按钮禁用/未触发提交）')
+
             print("⏳ 等待新的过期时间...")
             # Poll asynchronous UI completion; then reload once to read persisted state.
             for _attempt in range(6):
                 sb.sleep(3)
                 _body = sb.get_page_source()
                 _expiry = extract_expiry_date(_body)
+                print(f"   ↻ 第{_attempt + 1}次轮询到期: {_expiry}")
                 if (_expiry and _expiry != current_expiry) or re.search(r"Renew in (\d{2}:\d{2}:\d{2})", _body):
                     break
             try:
-                _requests = sb.execute_script('return window.__renewRequests || []')
-                print('Renewal response metadata:', json.dumps(_requests, ensure_ascii=False))
+                _requests = (read_renew_probe(sb) or {}).get('reqs') or []
+                _rel = [r for r in _requests
+                        if re.search(r"renew|billing|subscription", r.get('path') or '', re.I)]
+                print('Renewal response metadata:', json.dumps(_rel, ensure_ascii=False))
             except Exception:
                 pass
             sb.refresh_page()
